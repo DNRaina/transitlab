@@ -446,7 +446,7 @@ def main() -> int:
         parser.error(str(exc))
 
     try:
-        import swisseph as swe
+        import swisseph as swe  # type: ignore
     except ImportError:
         print("Missing chart dependency. Install transit-lab/requirements.txt.", file=sys.stderr)
         return 2
