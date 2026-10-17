@@ -1,34 +1,30 @@
-# Astro Sage
+# Transit Lab
 
-An installable agent skill for dual Jyotisha and Western natal chart readings. The skill combines a small Python chart calculator with source-aware interpretation instructions and an optional PDF export.
+Transit Lab is a Jyotisha-only installable agent skill. The user can share a birthplace, date, and ordinary local time phrase; the LLM handles clarification and the calculator resolves coordinates, time zone, UTC conversion, chart placements, and Vimshottari mahadasha. The LLM then writes the interpretation and can include it in a PDF.
 
-## Install
-
-From the project root, install the skill folder directly with the Skills CLI:
+## Install the skill
 
 ```sh
-npx skills add . --skill astro-sage
+npx skills add DNRaina/transitlab --skill transit-lab
 ```
 
-To distribute publicly, push this repository to GitHub and use:
+The Skills CLI installs the same skill format into Codex, Claude Code, Antigravity, and other supported agents.
+
+## Example
+
+Install Python dependencies, then:
 
 ```sh
-npx skills add OWNER/REPOSITORY --skill astro-sage
+python -m pip install -r transit-lab/requirements.txt
+python transit-lab/scripts/chart.py --date 1990-03-12 --time "subah ke 4" --place "Jaipur, India"
 ```
 
-The Skills CLI supports Codex, Claude Code, Antigravity and other agents; exact agent selection can be passed with `-a` if needed. Check `npx skills add --help` for current options.
+The script returns JSON. It sends only the place string to the OpenStreetMap Nominatim geocoder; time-zone lookup and birth-time conversion run locally. The agent should disclose this lookup and follow the [Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/). If a place, time zone, or clock time is ambiguous, it returns choices for the agent to clarify with the user. To create a PDF, add `--pdf report.pdf --reading interpretation.md` after the agent has written the interpretation.
 
-## Calculate a chart
+For coordinate input, pass `--latitude` and `--longitude`; the time zone is detected locally. An optional IANA `--timezone` can override it, for example `Asia/Kolkata`. See [the skill instructions](transit-lab/SKILL.md) and [methodology notes](transit-lab/references/methodology.md).
 
-Requires Python 3.10+ and the dependencies in `astro-sage/requirements.txt`:
+For a Nominatim-compatible geocoder you operate or have permission to use, override the host with `--nominatim-domain` or `TRANSIT_LAB_NOMINATIM_DOMAIN`.
 
-```sh
-python -m pip install -r astro-sage/requirements.txt
-python astro-sage/scripts/chart.py --datetime "1990-05-17T14:30:00+05:30" --latitude 19.076 --longitude 72.8777 --name "Example" --reading interpretation.md --pdf example-reading.pdf
-```
+## Licensing note
 
-The datetime must include an explicit UTC offset. Coordinates are decimal degrees, north/east positive. The script writes machine-readable chart JSON to stdout and can create a PDF containing chart data and, optionally, a written interpretation supplied as UTF-8 text/Markdown. It does not generate that interpretation.
-
-## Important distribution note
-
-Swiss Ephemeris is dual licensed under AGPL and a commercial/professional license. Review its current licensing requirements before distributing this package or offering a service based on its calculations. See `astro-sage/references/methodology.md`.
+Swiss Ephemeris is dual licensed under AGPL and a commercial/professional license. Review its current terms before distributing an application or providing a service based on its calculations. See [methodology notes](transit-lab/references/methodology.md).
