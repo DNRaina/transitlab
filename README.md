@@ -8,7 +8,9 @@ Transit Lab is a Jyotisha-only installable agent skill. The user can share a bir
 npx skills add DNRaina/transitlab --skill transit-lab
 ```
 
-The Skills CLI installs the same skill format into Codex, Claude Code, Antigravity, and other supported agents.
+`skills add` is the Skills CLI install command (there is no `skills install <repo>` command). The CLI detects a supported agent, or you can target one explicitly, for example `--agent codex`, `--agent claude-code`, or `--agent antigravity`.
+
+The public repository is installable directly from GitHub. I verified it with `npx skills add DNRaina/transitlab --list`; the CLI found the `transit-lab` skill and parsed its description. The `skills.sh` directory is an install leaderboard populated from anonymous CLI install telemetry, rather than a manual submission registry, so a valid skill can install before it appears in the directory. See the [skills.sh FAQ](https://www.skills.sh/docs/faq).
 
 ## Example
 
