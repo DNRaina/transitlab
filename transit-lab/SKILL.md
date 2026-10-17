@@ -16,10 +16,10 @@ Turn ordinary birth details into a careful Jyotisha chart and a readable, person
 3. For automatic birthplace lookup, briefly disclose that a city/town-level place name (only) will be sent to OpenStreetMap's public Nominatim service, link its [usage policy](https://operations.osmfoundation.org/policies/nominatim/), and use it only for this user-triggered one-time lookup. Do not send a street address, hospital, full birth date, or birth time; if the user gives an exact address, reduce it to the city/town before lookup or ask for coordinates. If they prefer not to send the place, use coordinates instead. The script geocodes the birthplace, detects its IANA time zone from the coordinates, applies the historical UTC offset for that date, and calculates in UTC. Example:
 
    ```sh
-   python scripts/chart.py --date 1990-03-12 --time "subah ke 4" --place "Jaipur, India"
+   python <path-to-skill>/scripts/chart.py --date 1990-03-12 --time "subah ke 4" --place "Jaipur, India"
    ```
 
-   (From repository root, use `python transit-lab/scripts/chart.py ...`.)
+   (When installed into a project via `npx skills`, use `python .agents/skills/transit-lab/scripts/chart.py ...`; from this source repo root, use `python transit-lab/scripts/chart.py ...`.)
 
    If the returned JSON has `status: needs_clarification`, present its choices in plain language, get the user's choice, then rerun: pass a selected clock time to `--time`, a selected zone to `--timezone-choice`, or a repeated-hour choice to `--dst-fold`. For an ambiguous place, use the selected result's `--latitude`, `--longitude`, and `--place-label` directly on rerun instead of repeating the external lookup. If the place cannot be resolved, ask for a city/region/country or coordinates. The calculator detects the time zone from coordinates; `--timezone` can override it with an IANA name.
 4. Use the returned JSON as the sole source for degrees, signs, sign lords, whole-sign house lords, retrograde status, lagna, nakshatra/pada, D9 navāṁśa, and Vimshottari mahadasha boundaries. Do not estimate these values or infer calculations that are absent. The chart defaults to sidereal zodiac, Lahiri/Chitrapaksha ayanamsha, whole-sign rāśi houses, and mean Rahu with Ketu opposite. These conventions are common but not universal; disclose them.
