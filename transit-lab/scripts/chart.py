@@ -261,11 +261,49 @@ def vimshottari(moon_longitude: float, birth_utc: datetime, zone: ZoneInfo) -> d
     periods = []
     now_utc = datetime.now(timezone.utc)
     current_mahadasha = None
+    current_antardasha = None
 
     for offset in range(len(DASHA_LORDS)):
         current_lord, full_years = DASHA_LORDS[(lord_index + offset) % len(DASHA_LORDS)]
         duration = balance if offset == 0 else full_years
         end = cursor + timedelta(days=duration * YEAR_DAYS)
+        # The birth mahadasha began before birth. Offset its antardasha cycle by
+        # the elapsed fraction so the subperiod active at birth is represented.
+        maha_cycle_start = cursor - timedelta(days=(full_years - balance) * YEAR_DAYS) if offset == 0 else cursor
+        antardashas = []
+        antar_cursor = maha_cycle_start
+        maha_lord_index = (lord_index + offset) % len(DASHA_LORDS)
+        for antar_offset in range(len(DASHA_LORDS)):
+            antar_lord, antar_years = DASHA_LORDS[(maha_lord_index + antar_offset) % len(DASHA_LORDS)]
+            antar_end = antar_cursor + timedelta(days=full_years * antar_years / 120.0 * YEAR_DAYS)
+            is_current_antar = antar_cursor <= now_utc < antar_end
+            antar_duration = antar_end - antar_cursor
+            pratyantardashas = []
+            praty_cursor = antar_cursor
+            antar_lord_index = (maha_lord_index + antar_offset) % len(DASHA_LORDS)
+            for praty_offset in range(len(DASHA_LORDS)):
+                praty_lord, praty_years = DASHA_LORDS[(antar_lord_index + praty_offset) % len(DASHA_LORDS)]
+                praty_end = praty_cursor + antar_duration * (praty_years / 120.0)
+                if praty_end > birth_utc:
+                    pratyantardashas.append({
+                        "lord": praty_lord,
+                        "start_local": praty_cursor.astimezone(zone).replace(microsecond=0).isoformat(),
+                        "end_local": praty_end.astimezone(zone).replace(microsecond=0).isoformat(),
+                        "is_current": praty_cursor <= now_utc < praty_end,
+                    })
+                praty_cursor = praty_end
+            if antar_end > birth_utc:
+                antardashas.append({
+                    "lord": antar_lord,
+                    "start_local": antar_cursor.astimezone(zone).replace(microsecond=0).isoformat(),
+                    "end_local": antar_end.astimezone(zone).replace(microsecond=0).isoformat(),
+                    "ongoing_at_birth": antar_cursor < birth_utc < antar_end,
+                    "is_current": is_current_antar,
+                    "pratyantardashas": pratyantardashas,
+                })
+            if is_current_antar:
+                current_antardasha = antar_lord
+            antar_cursor = antar_end
         start_local = cursor.astimezone(zone).replace(microsecond=0)
         end_local = end.astimezone(zone).replace(microsecond=0)
         is_cur = (cursor <= now_utc < end)
@@ -279,6 +317,7 @@ def vimshottari(moon_longitude: float, birth_utc: datetime, zone: ZoneInfo) -> d
             "start_local": start_local.isoformat(),
             "end_local": end_local.isoformat(),
             "is_current": is_cur,
+            "antardashas": antardashas,
         })
         cursor = end
 
@@ -290,7 +329,133 @@ def vimshottari(moon_longitude: float, birth_utc: datetime, zone: ZoneInfo) -> d
     }
     if current_mahadasha:
         res["current_mahadasha"] = current_mahadasha
+    if current_antardasha:
+        res["current_antardasha"] = current_antardasha
     return res
+
+
+def dasha_window(dasha: dict, start_date: date, end_date: date, zone: ZoneInfo) -> dict:
+    """List Vimshottari MD/AD/PD periods overlapping inclusive local calendar dates."""
+    window_start = datetime.combine(start_date, time.min, tzinfo=zone)
+    window_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=zone)
+
+    def clipped(start_text: str, end_text: str) -> tuple[datetime, datetime] | None:
+        period_start = datetime.fromisoformat(start_text)
+        period_end = datetime.fromisoformat(end_text)
+        overlap_start = max(period_start, window_start)
+        overlap_end = min(period_end, window_end)
+        if overlap_start >= overlap_end:
+            return None
+        return overlap_start, overlap_end
+
+    matches = []
+    for maha in dasha["mahadashas"]:
+        maha_overlap = clipped(maha["start_local"], maha["end_local"])
+        if not maha_overlap:
+            continue
+        antardashas = []
+        for antar in maha["antardashas"]:
+            antar_overlap = clipped(antar["start_local"], antar["end_local"])
+            if not antar_overlap:
+                continue
+            pratyantardashas = []
+            for praty in antar["pratyantardashas"]:
+                praty_overlap = clipped(praty["start_local"], praty["end_local"])
+                if praty_overlap:
+                    pratyantardashas.append({
+                        "lord": praty["lord"],
+                        "overlap_start_local": praty_overlap[0].isoformat(),
+                        "overlap_end_local_exclusive": praty_overlap[1].isoformat(),
+                    })
+            antardashas.append({
+                "lord": antar["lord"],
+                "overlap_start_local": antar_overlap[0].isoformat(),
+                "overlap_end_local_exclusive": antar_overlap[1].isoformat(),
+                "pratyantardashas": pratyantardashas,
+            })
+        matches.append({
+            "mahadasha_lord": maha["lord"],
+            "overlap_start_local": maha_overlap[0].isoformat(),
+            "overlap_end_local_exclusive": maha_overlap[1].isoformat(),
+            "antardashas": antardashas,
+        })
+
+    return {
+        "requested_start_local_inclusive": window_start.isoformat(),
+        "requested_end_local_inclusive": end_date.isoformat(),
+        "requested_end_local_exclusive": window_end.isoformat(),
+        "timezone": zone.key,
+        "mahadashas_overlapping": matches,
+        "note": "Calendar dates are interpreted in the birth location's time zone. End timestamps are exclusive; periods are clipped to the requested date window.",
+    }
+
+
+TITHIS = ["Pratipada", "Dvitiya", "Tritiya", "Chaturthi", "Panchami", "Shashthi", "Saptami", "Ashtami", "Navami", "Dashami", "Ekadashi", "Dwadashi", "Trayodashi", "Chaturdashi", "Purnima"]
+YOGAS = ["Vishkambha", "Priti", "Ayushman", "Saubhagya", "Shobhana", "Atiganda", "Sukarma", "Dhriti", "Shula", "Ganda", "Vriddhi", "Dhruva", "Vyaghata", "Harshana", "Vajra", "Siddhi", "Vyatipata", "Variyana", "Parigha", "Shiva", "Siddha", "Sadhya", "Shubha", "Shukla", "Brahma", "Indra", "Vaidhriti"]
+MOVABLE_KARANAS = ["Bava", "Balava", "Kaulava", "Taitila", "Garaja", "Vanija", "Vishti"]
+
+
+def panchanga(sun_longitude: float, moon_longitude: float) -> dict:
+    """Return tithi, karana, and nitya-yoga from geocentric sidereal longitudes."""
+    elongation = norm(moon_longitude - sun_longitude)
+    tithi_index = int(elongation // 12.0)
+    half_tithi_index = int(elongation // 6.0)
+    yoga_index = int(norm(sun_longitude + moon_longitude) // NAKSHATRA_SPAN)
+
+    if half_tithi_index == 0:
+        karana = "Kimstughna"
+    elif half_tithi_index >= 57:
+        karana = ["Shakuni", "Chatushpada", "Naga"][half_tithi_index - 57]
+    else:
+        karana = MOVABLE_KARANAS[(half_tithi_index - 1) % len(MOVABLE_KARANAS)]
+
+    tithi_name = TITHIS[tithi_index % 15]
+    if tithi_index == 29:
+        tithi_name = "Amavasya"
+
+    return {
+        "basis": "geocentric sidereal longitudes; tithi/yoga/karana only (not a full sunrise-based Panchanga)",
+        "elongation_degrees": round(elongation, 6),
+        "tithi": {
+            "number_in_paksha": tithi_index % 15 + 1,
+            "name": tithi_name,
+            "paksha": "Shukla" if tithi_index < 15 else "Krishna",
+            "index": tithi_index + 1,
+        },
+        "karana": karana,
+        "yoga": YOGAS[yoga_index],
+    }
+
+
+def gochara(swe, julian_day: float, calc_flags: int, natal_moon: float, natal_lagna: float) -> dict:
+    """Return current sidereal transit positions and sign counts from natal Moon/lagna."""
+    bodies = ["Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn"]
+    transit_positions = {}
+    for body_name in bodies:
+        coordinates, _ = swe.calc_ut(julian_day, getattr(swe, body_name.upper()), calc_flags)
+        transit_positions[body_name] = coordinates
+    rahu_coordinates, _ = swe.calc_ut(julian_day, swe.MEAN_NODE, calc_flags)
+    transit_positions["Rahu"] = rahu_coordinates
+    transit_positions["Ketu"] = (norm(rahu_coordinates[0] + 180.0), -rahu_coordinates[1], rahu_coordinates[2], rahu_coordinates[3], 0.0, 0.0)
+
+    moon_sign = int(norm(natal_moon) // 30)
+    lagna_sign = int(norm(natal_lagna) // 30)
+    transits = {}
+    for body_name, coordinates in transit_positions.items():
+        longitude = norm(coordinates[0])
+        sign_index = int(longitude // 30)
+        transits[body_name] = {
+            **zodiac(longitude),
+            "from_natal_moon_sign": (sign_index - moon_sign) % 12 + 1,
+            "from_natal_lagna_sign": (sign_index - lagna_sign) % 12 + 1,
+            "retrograde": coordinates[3] < 0 if body_name not in ("Rahu", "Ketu") else None,
+        }
+    return {
+        "calculated_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "system": "sidereal Lahiri; sign positions and sign counts from natal Moon and lagna",
+        "planets": transits,
+        "interpretation_note": "Transit placements are calculation data; interpret contextually and avoid deterministic event claims.",
+    }
 
 
 def markdown_to_reportlab_elements(md_text: str, styles) -> list:
@@ -387,11 +552,16 @@ def main() -> int:
     parser.add_argument("--longitude", type=float, help="Decimal degrees; east positive")
     parser.add_argument("--place-label", help="Optional readable name to retain when using selected coordinates")
     parser.add_argument("--timezone", help="IANA time zone override (e.g. Asia/Kolkata); auto-detected for --place")
+    parser.add_argument("--offline", action="store_true", help="Require supplied coordinates and time zone; disable place geocoding")
     parser.add_argument("--timezone-choice", help="Select a time zone when coordinates overlap multiple zones")
     parser.add_argument("--nominatim-domain", default=os.environ.get("TRANSIT_LAB_NOMINATIM_DOMAIN", "nominatim.openstreetmap.org"), help="Nominatim-compatible geocoder host")
     parser.add_argument("--dst-fold", choices=["earlier", "later"], help="Select an occurrence when a clock time happened twice during a DST change")
     parser.add_argument("--pdf", help="Optional output PDF path")
     parser.add_argument("--reading", help="Optional UTF-8 text/Markdown interpretation to include in the PDF")
+    parser.add_argument("--save-json", help="Optional local JSON chart path; contains exact birth time and location")
+    parser.add_argument("--redact-birth-details", action="store_true", help="Omit auto-generated birth details from the PDF; keep them out of the reading text too")
+    parser.add_argument("--dasha-range-start", help="Optional first local calendar date for a Vimshottari period-window report (YYYY-MM-DD)")
+    parser.add_argument("--dasha-range-end", help="Optional last local calendar date for a Vimshottari period-window report (YYYY-MM-DD, inclusive)")
     args = parser.parse_args()
 
     if args.reading and not args.pdf:
@@ -400,6 +570,12 @@ def main() -> int:
         parser.error("--latitude requires --longitude")
     if args.longitude is not None and args.latitude is None:
         parser.error("--longitude requires --latitude")
+    if args.offline and args.place:
+        parser.error("--offline cannot use --place; provide --latitude, --longitude, and --timezone")
+    if args.offline and not args.timezone:
+        parser.error("--offline requires --timezone so no location lookup is needed")
+    if bool(args.dasha_range_start) != bool(args.dasha_range_end):
+        parser.error("--dasha-range-start and --dasha-range-end must be provided together")
 
     try:
         birth_date = parse_date(args.date)
@@ -474,6 +650,15 @@ def main() -> int:
     ayanamsha = swe.get_ayanamsa_ut(julian_day)
     sidereal = {name: norm(position[0]) for name, position in positions.items()}
 
+    current_utc = datetime.now(timezone.utc)
+    current_jd = swe.julday(
+        current_utc.year,
+        current_utc.month,
+        current_utc.day,
+        current_utc.hour + current_utc.minute / 60.0 + current_utc.second / 3600.0,
+        swe.GREG_CAL,
+    )
+
     try:
         _, asc_mc = swe.houses_ex(julian_day, latitude, longitude, b"W", swe.FLG_SIDEREAL)
     except swe.Error as exc:
@@ -508,6 +693,17 @@ def main() -> int:
 
     moon_nak = get_nakshatra(sidereal["Moon"])
     local_aware = birth_utc.astimezone(zone)
+    dasha_data = vimshottari(sidereal["Moon"], birth_utc, zone)
+    dasha_range_data = None
+    if args.dasha_range_start and args.dasha_range_end:
+        try:
+            range_start = parse_date(args.dasha_range_start)
+            range_end = parse_date(args.dasha_range_end)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if range_end < range_start:
+            parser.error("--dasha-range-end must be on or after --dasha-range-start")
+        dasha_range_data = dasha_window(dasha_data, range_start, range_end, zone)
 
     # Human-readable ephemeris identification
     sun_flags = returned_flags.get("Sun", 0)
@@ -547,15 +743,29 @@ def main() -> int:
             "houses": houses,
             "planets": planets,
             "moon_nakshatra": moon_nak,
+            "birth_panchanga": panchanga(sidereal["Sun"], sidereal["Moon"]),
         },
-        "vimshottari_dasha": vimshottari(sidereal["Moon"], birth_utc, zone),
+        "vimshottari_dasha": dasha_data,
+        "gochara": gochara(swe, current_jd, calc_flags, sidereal["Moon"], sidereal_asc),
         "limitations": [
             "Astrological interpretation is symbolic and not an empirically validated prediction method.",
-            "This calculation includes D1, D9, Nakshatras, whole-sign houses, and Vimshottari mahadasha only; no antardasha, shadbala, or other vargas are calculated.",
+            "Panchanga output includes tithi, karana, and yoga only; vara and sunrise/sunset are not calculated.",
+            "Gochara provides current sidereal sign positions and sign counts from natal Moon and lagna; it does not calculate transit aspects or event predictions.",
+            "Vimshottari subperiod and date-range boundaries use a 365.2425-day year and are approximate.",
         ],
     }
+    if dasha_range_data is not None:
+        result["vimshottari_range"] = dasha_range_data
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    output_json = json.dumps(result, indent=2, ensure_ascii=False)
+    if args.save_json:
+        save_path = Path(args.save_json).expanduser()
+        try:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_text(output_json + "\n", encoding="utf-8")
+        except OSError as exc:
+            parser.error(f"Could not save local chart to {save_path}: {exc}")
+    print(output_json)
 
     if args.pdf:
         try:
@@ -570,6 +780,7 @@ def main() -> int:
         path = Path(args.pdf)
         path.parent.mkdir(parents=True, exist_ok=True)
         styles = getSampleStyleSheet()
+        report_label = "Private Chart" if args.redact_birth_details else resolved_place
 
         # Custom header styling
         title_style = ParagraphStyle("ChartTitle", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=18, leading=22, textColor=colors.HexColor("#1b2a47"), alignment=0)
@@ -578,12 +789,16 @@ def main() -> int:
         info_banner_style = ParagraphStyle("InfoBanner", parent=styles["Normal"], fontName="Helvetica", fontSize=9, leading=13, textColor=colors.HexColor("#1b2a47"))
 
         story = [
-            Paragraph(f"Transit Lab — {resolved_place}", title_style),
+            Paragraph(f"Transit Lab — {report_label}", title_style),
             Spacer(1, 4),
             Paragraph(
-                f"<b>Birth:</b> {local_aware.strftime('%Y-%m-%d %H:%M:%S')} {timezone_name} ({birth_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC) &nbsp;|&nbsp; "
-                f"<b>Coordinates:</b> {latitude:.4f}°, {longitude:.4f}° &nbsp;|&nbsp; "
-                f"<b>System:</b> Lahiri Sidereal, Whole-Sign Houses",
+                (
+                    "<b>Birth details:</b> withheld &nbsp;|&nbsp; <b>System:</b> Lahiri Sidereal, Whole-Sign Houses"
+                    if args.redact_birth_details else
+                    f"<b>Birth:</b> {local_aware.strftime('%Y-%m-%d %H:%M:%S')} {timezone_name} ({birth_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC) &nbsp;|&nbsp; "
+                    f"<b>Coordinates:</b> {latitude:.4f}°, {longitude:.4f}° &nbsp;|&nbsp; "
+                    f"<b>System:</b> Lahiri Sidereal, Whole-Sign Houses"
+                ),
                 subtitle_style
             ),
             Spacer(1, 8),
@@ -609,6 +824,25 @@ def main() -> int:
             ("RIGHTPADDING", (0, 0), (-1, -1), 10),
         ]))
         story.extend([banner_table, Spacer(1, 10)])
+
+        # Birth Panchanga factors currently calculated by the engine
+        story.append(Paragraph("Birth Panchanga (Partial)", section_style))
+        birth_panchanga = result["jyotisha"]["birth_panchanga"]
+        panchanga_row = [[
+            f"{birth_panchanga['tithi']['paksha']} {birth_panchanga['tithi']['name']}",
+            birth_panchanga["karana"],
+            birth_panchanga["yoga"],
+            "Tithi / Karana / Yoga only",
+        ]]
+        panchanga_table = Table([["Tithi", "Karana", "Nitya Yoga", "Scope"], *panchanga_row], colWidths=[115, 100, 100, 200], repeatRows=1)
+        panchanga_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1b2a47")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd2dc")),
+        ]))
+        story.extend([panchanga_table, Spacer(1, 10)])
 
         # Planetary positions table
         story.append(Paragraph("Graha Placements (D1 & D9)", section_style))
@@ -672,6 +906,75 @@ def main() -> int:
         dasha_table.setStyle(TableStyle(dasha_style))
         story.extend([dasha_table, Spacer(1, 10)])
 
+        current_md = next((period for period in result["vimshottari_dasha"]["mahadashas"] if period.get("is_current")), None)
+        if current_md:
+            active_period = result["vimshottari_dasha"].get("current_mahadasha", "Unknown")
+            active_subperiod = result["vimshottari_dasha"].get("current_antardasha", "Unknown")
+            story.append(Paragraph(f"Current Vimshottari period: {active_period} / {active_subperiod}", subtitle_style))
+            antar_rows = [["Antardasha Lord", "Start Date (Local)", "End Date (Local)", "Status"]]
+            for period in current_md["antardashas"]:
+                antar_rows.append([
+                    period["lord"],
+                    period["start_local"][:10],
+                    period["end_local"][:10],
+                    "Current" if period.get("is_current") else ("At birth" if period.get("ongoing_at_birth") else ""),
+                ])
+            antar_table = Table(antar_rows, colWidths=[130, 130, 130, 125], repeatRows=1, hAlign="LEFT")
+            antar_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1b2a47")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd2dc")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+            ]))
+            story.extend([antar_table, Spacer(1, 10)])
+
+        # Current sidereal transit positions are a snapshot, not predictions.
+        story.append(Paragraph("Current Gochara Snapshot", section_style))
+        gochara_rows = [["Graha", "Transit Sign", "From Natal Moon", "From Lagna", "Motion"]]
+        for name, transit in result["gochara"]["planets"].items():
+            motion = "Retrograde" if transit["retrograde"] else ("Direct" if transit["retrograde"] is False else "Mean Node")
+            gochara_rows.append([name, transit["sign"], str(transit["from_natal_moon_sign"]), str(transit["from_natal_lagna_sign"]), motion])
+        gochara_table = Table(gochara_rows, colWidths=[75, 125, 110, 100, 100], repeatRows=1, hAlign="LEFT")
+        gochara_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1b2a47")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd2dc")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+        ]))
+        story.extend([gochara_table, Spacer(1, 4), Paragraph(f"Snapshot calculated at {result['gochara']['calculated_at_utc']} UTC. Panchanga is partial; gochara shows signs only.", subtitle_style), Spacer(1, 10)])
+
+        if result.get("vimshottari_range"):
+            window = result["vimshottari_range"]
+            story.append(Paragraph("Vimshottari Periods in Selected Date Range", section_style))
+            story.append(Paragraph(
+                f"{window['requested_start_local_inclusive'][:10]} through {window['requested_end_local_inclusive']} ({window['timezone']})",
+                subtitle_style,
+            ))
+            range_rows = [["Level", "Lord", "Overlap Starts (Local)", "Overlap Ends (Local)"]]
+            for maha in window["mahadashas_overlapping"]:
+                range_rows.append(["Mahadasha", maha["mahadasha_lord"], maha["overlap_start_local"], maha["overlap_end_local_exclusive"]])
+                for antar in maha["antardashas"]:
+                    range_rows.append(["Antardasha", antar["lord"], antar["overlap_start_local"], antar["overlap_end_local_exclusive"]])
+                    for praty in antar["pratyantardashas"]:
+                        range_rows.append(["Pratyantardasha", praty["lord"], praty["overlap_start_local"], praty["overlap_end_local_exclusive"]])
+            if len(range_rows) == 1:
+                range_rows.append(["—", "No dasha periods in calculated sequence overlap this range", "", ""])
+            range_table = Table(range_rows, colWidths=[95, 100, 165, 165], repeatRows=1, hAlign="LEFT")
+            range_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1b2a47")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#cbd2dc")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.extend([range_table, Spacer(1, 10)])
+
         # Reading Interpretation Section
         if args.reading:
             story.append(Paragraph("Astrological Interpretation", section_style))
@@ -680,9 +983,11 @@ def main() -> int:
             story.append(Spacer(1, 8))
 
         # Method and limits footer note
+        time_method_note = "Birth time converted using the IANA time-zone database. " if args.redact_birth_details else f"Local time converted using IANA database ({timezone_name}). "
         method_note = (
             f"<b>Calculation Method &amp; Limits:</b> Calculations computed via Swiss Ephemeris with Lahiri/Chitrapaksha ayanamsha "
-            f"({ayanamsha:.4f}°) and whole-sign houses. Local time converted using IANA database ({timezone_name}). "
+            f"({ayanamsha:.4f}°) and whole-sign houses. "
+            f"{time_method_note}"
             f"{OSM_ATTRIBUTION if args.place else ''} Astrology is a cultural and reflective symbolic tradition; it does not substitute "
             f"for medical, legal, or financial professional guidance."
         )
@@ -693,7 +998,7 @@ def main() -> int:
             canvas.saveState()
             canvas.setFont("Helvetica", 8)
             canvas.setFillColor(colors.HexColor("#718096"))
-            canvas.drawString(36, 20, f"Transit Lab • Jyotisha Chart ({resolved_place})")
+            canvas.drawString(36, 20, f"Transit Lab • Jyotisha Chart ({report_label})")
             canvas.drawRightString(letter[0] - 36, 20, f"Page {doc.page}")
             canvas.restoreState()
 
@@ -704,7 +1009,7 @@ def main() -> int:
             leftMargin=36,
             topMargin=36,
             bottomMargin=36,
-            title=f"Transit Lab — {resolved_place}",
+            title=f"Transit Lab — {report_label}",
         )
         doc.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
 
